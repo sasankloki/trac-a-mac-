@@ -1,0 +1,113 @@
+#!/usr/bin/python
+
+
+import time
+from datetime import datetime
+import sqlite3
+from easysnmp import Session
+from sqlite3 import Error
+
+default = 'DEFAULT_VLAN'
+def  connecting(db_file):
+    """ create a database connection to a SQLite database """
+    bind = None
+    try:
+        bind = sqlite3.connect(db_file)
+    except Error as e:
+        print(e)
+    finally:
+        if bind:
+            switch_info = bind.execute('Select * from info')
+            for i in switch_info:
+                ip = i[0]; port=int(i[1]); community=i[2]; version=int(i[3])
+                track_device(ip, port, community,version, bind)
+
+            bind.close()
+def track_device(ip, port, community, version, bind):
+    oids = {'dot1dTpFdbEntryAddress':'1.3.6.1.2.1.17.4.3.1.1',
+            'dot1dTpFdbEntryPort':'1.3.6.1.2.1.17.4.3.1.2',
+            'dot1qTpFdbEntryStatus':'1.3.6.1.2.1.17.4.3.1.3',
+            'dot1qTpFdbAddress':'1.3.6.1.2.17.7.1.2.2.1.1',
+            'dot1qTpFdbPort':'1.3.6.1.2.1.17.7.1.2.2.1.2',
+            'dot1qTpFdbStatus':'1.3.6.1.2.1.17.7.1.2.2.1.3',
+            'dot1qVlanStaticName':'1.3.6.1.2.1.17.7.1.4.3.1.1',
+            'sysDescr':'1.1.3.6.1.2.1.1.1',
+            'dot1dBasePortIfIndex':'1.3.6.1.2.1.17.1.4.1.2',
+            'vlans':'1.3.6.1.2.1.17.7.1.4.3.1.4'}
+    try:
+        session = Session(hostname=ip, remote_port=port, version=version, community=community)
+    except Exception as e:
+        print(e)
+        break_down = bind.execute("select failed_attempts from info where ip=?, port=?",(ip,port))
+        break_down += 1
+        bind.execute("update info set failed_attempts=? where (ip=? and port=?)",(break_down,ip,port))
+        bind.commit()
+    started_probing = str(datetime.fromtimestamp(int(time.time())))
+    print(started_probing)
+    try:
+        macs = session.walk(oids['dot1dTpFdbEntryAddress'])
+        ports = session.walk(oids['dot1dTpFdbEntryPort'])
+        for x,y in zip(macs, ports):
+            oid = x.oid;oid_index = x.oid_index;snmp_type=x.snmp_type
+            mac = ':'.join('{:02x}'.format(ord(a)) for a in x.value)
+            port_value = y.value
+            print(ip,mac,port_value)
+            switch_info = bind.execute("SELECT * from List where (port=? and IP=?)",(port_value,ip))
+            fetch_info = switch_info.fetchall()
+            for macs_in_connection in fetch_info:
+                x = macs_in_connection[3]
+            if len(fetch_info)==0:
+                print(ip,mac,port_value)
+                bind.execute('''INSERT INTO List(IP, VLANS, port, MACS) values (?,?,?,?)''',(ip,default,port_value,mac))
+                bind.commit()
+            elif len(fetch_info)==1 and x.find(mac)==-1:
+                finalmac = x+","+mac
+                bind.execute("UPDATE List set MACS=? where port=?",(finalmac,port_value))
+                bind.commit()
+        vlans_num = []
+        vlan_name = []
+        vlans = session.walk(oids['vlans'])
+        vlanindex = session.walk(oids['dot1qVlanStaticName'])
+        values = []
+        vlan_oids = []
+        for index, vlan in zip(vlanindex, vlans):
+            value = ':'.join('{:02x}'.format(ord(x)) for x in vlan.value)
+            values = value.split(':')
+            oid = vlan.oid
+            vlan_oids.append(oid)
+            vname = index.value
+            vnums = oid.split('.')
+            vnum = str(vnums[-1])
+            combine = ''
+            if vname != default:
+                for i in range(len(values)):
+                    hex_list = values
+                    mac_hex = hex_list[i]
+                    scale = 16
+                    bits = 8
+                    octet = bin(int(mac_hex, scale))[2:].zfill(bits)
+                    combine = combine + str(octet)
+                    octet = ''
+                    list_of_vlans = list(combine)
+                for i in range(len(list_of_vlans)):
+                    
+                    number = i + 1
+                    vlan_name.append(str(vname))
+                    vlans_num.append(number)
+        for i in range(len(vlans_num)):
+            #portlan = '1'
+            bind.execute("update List set VLANS = ? where port=?", (vlan_name[i],vlans_num[i]))
+            time.sleep(0.005)
+            bind.commit()
+    except Exception as e:
+        print(str(e)+' '+str(ip)+":"+str(port))
+    ended = str(datetime.fromtimestamp(int(time.time())))
+  #  print(ended)
+   # print('ok!')
+    bind.execute("update info set first_probe=?, latest_probe=? where (ip=? and port=?)",(started_probing, ended, ip, port))
+    bind.commit()
+  #  print("Db updated!")
+if  __name__=='__main__':
+    while True:
+        connecting('sasank.db')
+        time.sleep(10)
